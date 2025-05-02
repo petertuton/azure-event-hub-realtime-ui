@@ -1,0 +1,4 @@
+{
+    "appService.defaultWebAppToDeploy": "/subscriptions/ec968e47-37d2-4301-a6b7-6a46539195eb/resourceGroups/event-hub-dashboard-rg/providers/Microsoft.Web/sites/event-hub-realtime-dashboard",
+    "appService.deploySubpath": "."
+}
