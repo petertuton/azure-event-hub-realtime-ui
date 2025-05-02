@@ -1,0 +1,748 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Azure Event Hub Real-time Dashboard</title>
+    
+    <!-- Bootstrap CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    
+    <!-- Chart.js with time adapter -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.3.0/dist/chart.umd.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
+    
+    <!-- Socket.IO -->
+    <script src="https://cdn.jsdelivr.net/npm/socket.io-client@4.6.1/dist/socket.io.min.js"></script>
+    
+    <style>
+        body {
+            padding-top: 20px;
+            background-color: #f8f9fa;
+        }
+        .card {
+            margin-bottom: 20px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+        .card-header {
+            background-color: #0078d4; /* Azure blue */
+            color: white;
+        }
+        .connection-status {
+            font-size: 0.85rem;
+        }
+        .status-connected {
+            color: #28a745;
+        }
+        .status-disconnected {
+            color: #dc3545;
+        }
+        .chart-container {
+            position: relative;
+            height: 250px;
+            width: 100%;
+            margin-bottom: 20px;
+        }
+        #raw-data {
+            max-height: 300px;
+            overflow: auto;
+            font-family: monospace;
+        }
+        #control-panel {
+            position: sticky;
+            top: 20px;
+        }
+        #charts-container {
+            transition: all 0.3s ease;
+        }
+        .dataset-card {
+            margin-bottom: 20px;
+        }
+        .hidden {
+            display: none;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header class="pb-3 mb-4 border-bottom">
+            <div class="d-flex align-items-center">
+                <h1 class="me-3">Azure Event Hub Real-time Dashboard</h1>
+                <div class="connection-status ms-auto">
+                    Status: <span id="connection-status" class="status-disconnected">Disconnected</span>
+                </div>
+            </div>
+        </header>
+
+        <div class="row">
+            <div class="col-md-3">
+                <div class="card" id="control-panel">
+                    <div class="card-header">
+                        Control Panel
+                    </div>
+                    <div class="card-body">
+                        <button id="connect-button" class="btn btn-primary mb-3">Connect to Event Hub</button>
+                        
+                        <h6 class="mt-4">Chart Settings</h6>
+                        <div class="mb-3">
+                            <label for="time-window" class="form-label">Time Window (seconds)</label>
+                            <input type="number" class="form-control" id="time-window" value="60" min="10">
+                        </div>
+                        
+                        <div class="mb-3">
+                            <label for="chart-type" class="form-label">Chart Type</label>
+                            <select class="form-select" id="chart-type">
+                                <option value="line">Line Chart</option>
+                                <option value="bar">Bar Chart</option>
+                            </select>
+                        </div>
+                        
+                        <div class="form-check">
+                            <input class="form-check-input" type="checkbox" id="auto-scale" checked>
+                            <label class="form-check-label" for="auto-scale">
+                                Auto-scale Y-axis
+                            </label>
+                        </div>
+
+                        <div class="mt-3">
+                            <button id="pause-all-button" class="btn btn-outline-secondary btn-sm me-2">Pause All</button>
+                            <button id="clear-all-button" class="btn btn-outline-danger btn-sm">Clear All</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="col-md-9">
+                <div class="card mb-4">
+                    <div class="card-header">
+                        Data Metrics
+                    </div>
+                    <div class="card-body">
+                        <div class="row">
+                            <div class="col-md-3 mb-3">
+                                <div class="card">
+                                    <div class="card-body">
+                                        <h5 class="card-title">Messages</h5>
+                                        <p class="card-text" id="message-count">0</p>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="col-md-3 mb-3 hidden">
+                                <div class="card">
+                                    <div class="card-body">
+                                        <h5 class="card-title">Latest Value</h5>
+                                        <p class="card-text" id="latest-value">-</p>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="col-md-3 mb-3 hidden">
+                                <div class="card">
+                                    <div class="card-body">
+                                        <h5 class="card-title">Min Value</h5>
+                                        <p class="card-text" id="min-value">-</p>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="col-md-3 mb-3 hidden">
+                                <div class="card">
+                                    <div class="card-body">
+                                        <h5 class="card-title">Max Value</h5>
+                                        <p class="card-text" id="max-value">-</p>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Container for dynamically created charts -->
+                <div id="charts-container"></div>
+                
+                <div class="card">
+                    <div class="card-header">
+                        Latest Raw Data
+                    </div>
+                    <div class="card-body">
+                        <pre id="raw-data">No data received yet.</pre>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <script>
+        // DOM Elements
+        const connectButton = document.getElementById('connect-button');
+        const connectionStatus = document.getElementById('connection-status');
+        const timeWindowInput = document.getElementById('time-window');
+        const chartTypeSelect = document.getElementById('chart-type');
+        const autoScaleCheckbox = document.getElementById('auto-scale');
+        const pauseAllButton = document.getElementById('pause-all-button');
+        const clearAllButton = document.getElementById('clear-all-button');
+        const messageCountElement = document.getElementById('message-count');
+        const latestValueElement = document.getElementById('latest-value');
+        const minValueElement = document.getElementById('min-value');
+        const maxValueElement = document.getElementById('max-value');
+        const rawDataElement = document.getElementById('raw-data');
+        const chartsContainer = document.getElementById('charts-container');
+
+        // Charts storage
+        let charts = {};
+        
+        // Data storage
+        let dataPoints = {};
+        let messageCount = 0;
+        let isPausedAll = false;
+        
+        // Settings
+        let timeWindow = 60; // seconds
+        let chartType = 'line';
+        let autoScale = true;
+        
+        // Debug flag - set to true to see detailed logs
+        const DEBUG = true;
+        
+        // Update Queue & Animation Frame handling
+        let isUpdateScheduled = false;
+        let updateQueue = [];
+        let lastUpdateTime = 0;
+        const MIN_UPDATE_INTERVAL = 50; // ms between updates (throttling)
+        
+        // Schedule an update with animation frame and throttling
+        function scheduleUpdate() {
+            if (!isUpdateScheduled) {
+                isUpdateScheduled = true;
+                requestAnimationFrame(processUpdateQueue);
+            }
+        }
+        
+        // Process all pending updates in the queue
+        function processUpdateQueue() {
+            isUpdateScheduled = false;
+            
+            const now = performance.now();
+            const timeSinceLastUpdate = now - lastUpdateTime;
+            
+            // Throttle updates to avoid overwhelming the browser
+            if (timeSinceLastUpdate < MIN_UPDATE_INTERVAL) {
+                isUpdateScheduled = true;
+                setTimeout(() => {
+                    requestAnimationFrame(processUpdateQueue);
+                }, MIN_UPDATE_INTERVAL - timeSinceLastUpdate);
+                return;
+            }
+            
+            if (updateQueue.length > 0) {
+                // Take the most recent 10 events max to avoid frame drops
+                const batch = updateQueue.splice(0, Math.min(10, updateQueue.length));
+                
+                if (DEBUG) console.log(`Processing ${batch.length} queued updates`);
+                
+                // Process each update in the batch
+                batch.forEach(data => {
+                    processChartUpdate(data);
+                });
+                
+                // Update all charts at once after processing the batch
+                for (const key in charts) {
+                    if (!charts[key].paused && !isPausedAll) {
+                        charts[key].chart.update();
+                    }
+                }
+                
+                lastUpdateTime = performance.now();
+            }
+            
+            // If there are more updates in the queue, schedule another frame
+            if (updateQueue.length > 0) {
+                isUpdateScheduled = true;
+                requestAnimationFrame(processUpdateQueue);
+            }
+        }
+        
+        // Create a new chart for a dataset
+        function createChartForDataset(datasetKey) {
+            if (DEBUG) console.log(`Creating new chart for dataset: ${datasetKey}`);
+            
+            // Create card for this chart
+            const cardDiv = document.createElement('div');
+            cardDiv.className = 'card dataset-card';
+            cardDiv.id = `card-${datasetKey}`;
+            
+            // Generate a random color for this dataset
+            const color = getRandomColor();
+            
+            // Create card header with controls
+            const cardHeader = document.createElement('div');
+            cardHeader.className = 'card-header d-flex justify-content-between align-items-center';
+            cardHeader.innerHTML = `
+                <span>${datasetKey} Data</span>
+                <div class="btn-group btn-group-sm" role="group">
+                    <button type="button" class="btn btn-outline-light pause-button" data-key="${datasetKey}">Pause</button>
+                    <button type="button" class="btn btn-outline-light clear-button" data-key="${datasetKey}">Clear</button>
+                </div>
+            `;
+            
+            // Create card body with chart
+            const cardBody = document.createElement('div');
+            cardBody.className = 'card-body';
+            
+            const chartContainer = document.createElement('div');
+            chartContainer.className = 'chart-container';
+            
+            const canvas = document.createElement('canvas');
+            canvas.id = `chart-${datasetKey}`;
+            
+            // Metrics section for this dataset
+            const metricsDiv = document.createElement('div');
+            metricsDiv.className = 'row mt-2';
+            metricsDiv.innerHTML = `
+                <div class="col-md-4">
+                    <small>Min: <span id="min-${datasetKey}">-</span></small>
+                </div>
+                <div class="col-md-4">
+                    <small>Max: <span id="max-${datasetKey}">-</span></small>
+                </div>
+                <div class="col-md-4">
+                    <small>Latest: <span id="latest-${datasetKey}">-</span></small>
+                </div>
+            `;
+            
+            // Assemble the card
+            chartContainer.appendChild(canvas);
+            cardBody.appendChild(chartContainer);
+            cardBody.appendChild(metricsDiv);
+            cardDiv.appendChild(cardHeader);
+            cardDiv.appendChild(cardBody);
+            
+            // Add card to the container
+            chartsContainer.appendChild(cardDiv);
+            
+            // Initialize the chart
+            const ctx = canvas.getContext('2d');
+            const chart = new Chart(ctx, {
+                type: chartType,
+                data: {
+                    datasets: [{
+                        label: datasetKey,
+                        data: [],
+                        backgroundColor: color,
+                        borderColor: color,
+                        fill: false,
+                        pointRadius: 2
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    animation: {
+                        duration: 0  // Disable animation for better performance
+                    },
+                    scales: {
+                        x: {
+                            type: 'time',
+                            time: {
+                                unit: 'second',
+                                displayFormats: {
+                                    second: 'HH:mm:ss'
+                                }
+                            },
+                            title: {
+                                display: true,
+                                text: 'Time'
+                            }
+                        },
+                        y: {
+                            beginAtZero: false,
+                            title: {
+                                display: true,
+                                text: 'Value'
+                            }
+                        }
+                    },
+                    plugins: {
+                        legend: {
+                            position: 'top',
+                        },
+                        tooltip: {
+                            mode: 'index',
+                            intersect: false,
+                        }
+                    },
+                    interaction: {
+                        mode: 'nearest',
+                        axis: 'x',
+                        intersect: false
+                    }
+                }
+            });
+            
+            // Store chart reference and extra properties
+            charts[datasetKey] = {
+                chart: chart,
+                paused: false,
+                color: color,
+                element: cardDiv
+            };
+            
+            // Add event listeners for this chart's buttons
+            const pauseButton = cardDiv.querySelector('.pause-button');
+            pauseButton.addEventListener('click', function() {
+                const key = this.getAttribute('data-key');
+                charts[key].paused = !charts[key].paused;
+                this.textContent = charts[key].paused ? 'Resume' : 'Pause';
+            });
+            
+            const clearButton = cardDiv.querySelector('.clear-button');
+            clearButton.addEventListener('click', function() {
+                const key = this.getAttribute('data-key');
+                clearChartData(key);
+            });
+            
+            if (DEBUG) console.log(`Chart for ${datasetKey} created successfully`);
+            return chart;
+        }
+        
+        // Clear data for a specific chart
+        function clearChartData(key) {
+            if (charts[key]) {
+                charts[key].chart.data.datasets[0].data = [];
+                charts[key].chart.update();
+                
+                // Clear dataset metrics
+                document.getElementById(`min-${key}`).textContent = '-';
+                document.getElementById(`max-${key}`).textContent = '-';
+                document.getElementById(`latest-${key}`).textContent = '-';
+                
+                // Clear data points
+                dataPoints[key] = [];
+            }
+        }
+        
+        // Update chart with new data
+        function updateChart(data) {
+            try {
+                if (DEBUG) console.log("Received data:", data);
+                
+                if (!data || !data.values || Object.keys(data.values).length === 0) {
+                    console.warn("Received data has no values to chart:", data);
+                    return;
+                }
+                
+                // Add data to the update queue
+                updateQueue.push(data);
+                
+                // Schedule an update if not already scheduled
+                scheduleUpdate();
+                
+                // Update raw data display immediately
+                rawDataElement.textContent = JSON.stringify(data.raw_data, null, 2);
+                
+            } catch (error) {
+                console.error("Error queueing update:", error);
+            }
+        }
+        
+        // Process chart updates (called from animation frame)
+        function processChartUpdate(data) {
+            try {
+                // Parse the time string to a Date object
+                const time = new Date(data.time);
+                if (DEBUG) console.log("Processing time:", time);
+                
+                // Add each value as a data point to its series
+                for (const key in data.values) {
+                    const value = data.values[key];
+                    if (DEBUG) console.log(`Processing data point for ${key}: ${value} at ${time}`);
+                    
+                    // Create dataset and chart if it doesn't exist
+                    if (!dataPoints[key]) {
+                        dataPoints[key] = [];
+                        createChartForDataset(key);
+                    }
+                    
+                    // Skip if chart is paused
+                    if ((charts[key] && charts[key].paused) || isPausedAll) {
+                        continue;
+                    }
+                    
+                    // Check if this data point already exists (same timestamp)
+                    // This prevents duplicate points when receiving the same event multiple times
+                    const existingPointIndex = dataPoints[key].findIndex(point => 
+                        Math.abs(point.x.getTime() - time.getTime()) < 100 && Math.abs(point.y - value) < 0.001
+                    );
+                    
+                    if (existingPointIndex === -1) {
+                        // Add data point only if it doesn't exist already
+                        dataPoints[key].push({
+                            x: time,
+                            y: value
+                        });
+                        
+                        // Increment message count only for new data
+                        messageCount++;
+                        messageCountElement.textContent = messageCount;
+                    } else if (DEBUG) {
+                        console.log(`Skipping duplicate data point for ${key}: ${value} at ${time}`);
+                    }
+                    
+                    // Remove old data points outside the time window
+                    const cutoff = new Date(new Date().getTime() - timeWindow * 1000);
+                    dataPoints[key] = dataPoints[key].filter(point => point.x > cutoff);
+                    
+                    // Sort data points by time to ensure proper line rendering
+                    dataPoints[key].sort((a, b) => a.x - b.x);
+                    
+                    // Update the chart data (but don't update yet - that happens at the end of the batch)
+                    if (charts[key]) {
+                        charts[key].chart.data.datasets[0].data = [...dataPoints[key]]; // Use a copy of the array
+                    }
+                    
+                    // Update dataset-specific metrics
+                    updateDatasetMetrics(key, value);
+                }
+                
+                if (DEBUG) console.log("Chart data updated successfully");
+            } catch (error) {
+                console.error("Error processing chart update:", error);
+            }
+        }
+        
+        // Update dataset-specific metrics
+        function updateDatasetMetrics(key, value) {
+            document.getElementById(`latest-${key}`).textContent = value;
+            
+            // Calculate min and max
+            if (dataPoints[key] && dataPoints[key].length > 0) {
+                const values = dataPoints[key].map(p => p.y);
+                const min = Math.min(...values);
+                const max = Math.max(...values);
+                
+                document.getElementById(`min-${key}`).textContent = min;
+                document.getElementById(`max-${key}`).textContent = max;
+            }
+        }
+        
+        // Generate a random color
+        function getRandomColor() {
+            const letters = '0123456789ABCDEF';
+            let color = '#';
+            for (let i = 0; i < 6; i++) {
+                color += letters[Math.floor(Math.random() * 16)];
+            }
+            return color;
+        }
+        
+        // Socket.IO setup
+        let socket = null;
+        
+        // Connect to Event Hub
+        connectButton.addEventListener('click', function() {
+            if (socket && socket.connected) {
+                socket.disconnect();
+                connectButton.textContent = 'Connect to Event Hub';
+                connectionStatus.textContent = 'Disconnected';
+                connectionStatus.className = 'status-disconnected';
+                return;
+            }
+            
+            // Start the Event Hub processor on the server
+            fetch('/api/start', {
+                method: 'POST'
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.status === 'success') {
+                    // Clear any existing data before reconnecting
+                    messageCount = 0;
+                    messageCountElement.textContent = '0';
+                    rawDataElement.textContent = 'No data received yet.';
+                    
+                    // Reset update queue and timing
+                    updateQueue = [];
+                    isUpdateScheduled = false;
+                    lastUpdateTime = 0;
+                    
+                    // Remove all chart elements from DOM
+                    chartsContainer.innerHTML = '';
+                    
+                    // Clear all charts and data points
+                    for (const key in charts) {
+                        if (charts[key].chart) {
+                            charts[key].chart.destroy(); // Properly destroy Chart.js instances
+                        }
+                    }
+                    
+                    // Reset both dataPoints and charts objects to prevent any stale data or DOM elements
+                    dataPoints = {};
+                    charts = {};
+                    
+                    // Connect to Socket.IO server with more reliable settings
+                    socket = io({
+                        reconnectionDelayMax: 10000,
+                        reconnectionAttempts: 10,
+                        timeout: 20000
+                    });
+                    
+                    socket.on('connect', function() {
+                        connectButton.textContent = 'Disconnect';
+                        connectionStatus.textContent = 'Connected';
+                        connectionStatus.className = 'status-connected';
+                        
+                        // Load initial data
+                        loadInitialData();
+                    });
+                    
+                    socket.on('disconnect', function() {
+                        connectButton.textContent = 'Connect to Event Hub';
+                        connectionStatus.textContent = 'Disconnected';
+                        connectionStatus.className = 'status-disconnected';
+                    });
+                    
+                    socket.on('new_data', function(data) {
+                        updateChart(data);
+                    });
+                } else {
+                    alert('Error starting Event Hub processor: ' + data.message);
+                }
+            })
+            .catch(error => {
+                console.error('Error starting Event Hub processor:', error);
+                alert('Error connecting to the server');
+            });
+        });
+        
+        // Load initial data from API
+        function loadInitialData() {
+            fetch('/api/data/recent')
+                .then(response => response.json())
+                .then(data => {
+                    if (data.status === 'success') {
+                        // Process each data point
+                        data.data.forEach(point => {
+                            updateChart(point);
+                        });
+                    }
+                })
+                .catch(error => {
+                    console.error('Error loading initial data:', error);
+                });
+        }
+        
+        // UI Controls
+        timeWindowInput.addEventListener('change', function() {
+            timeWindow = parseInt(this.value);
+        });
+        
+        chartTypeSelect.addEventListener('change', function() {
+            chartType = this.value;
+            
+            // Update all charts to the new type
+            for (const key in charts) {
+                const chartData = charts[key].chart.data.datasets[0].data;
+                const color = charts[key].color;
+                
+                // Destroy old chart
+                charts[key].chart.destroy();
+                
+                // Create new chart with the same data but new type
+                const canvas = document.getElementById(`chart-${key}`);
+                const ctx = canvas.getContext('2d');
+                
+                charts[key].chart = new Chart(ctx, {
+                    type: chartType,
+                    data: {
+                        datasets: [{
+                            label: key,
+                            data: chartData,
+                            backgroundColor: color,
+                            borderColor: color,
+                            fill: false,
+                            pointRadius: 2
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        animation: {
+                            duration: 0
+                        },
+                        scales: {
+                            x: {
+                                type: 'time',
+                                time: {
+                                    unit: 'second',
+                                    displayFormats: {
+                                        second: 'HH:mm:ss'
+                                    }
+                                },
+                                title: {
+                                    display: true,
+                                    text: 'Time'
+                                }
+                            },
+                            y: {
+                                beginAtZero: !autoScale,
+                                title: {
+                                    display: true,
+                                    text: 'Value'
+                                }
+                            }
+                        },
+                        plugins: {
+                            legend: {
+                                position: 'top',
+                            },
+                            tooltip: {
+                                mode: 'index',
+                                intersect: false,
+                            }
+                        },
+                        interaction: {
+                            mode: 'nearest',
+                            axis: 'x',
+                            intersect: false
+                        }
+                    }
+                });
+            }
+        });
+        
+        autoScaleCheckbox.addEventListener('change', function() {
+            autoScale = this.checked;
+            
+            // Update all charts
+            for (const key in charts) {
+                charts[key].chart.options.scales.y.beginAtZero = !autoScale;
+                charts[key].chart.update();
+            }
+        });
+        
+        // Pause all charts
+        pauseAllButton.addEventListener('click', function() {
+            isPausedAll = !isPausedAll;
+            this.textContent = isPausedAll ? 'Resume All' : 'Pause All';
+        });
+        
+        // Clear all charts
+        clearAllButton.addEventListener('click', function() {
+            messageCount = 0;
+            messageCountElement.textContent = '0';
+            latestValueElement.textContent = '-';
+            minValueElement.textContent = '-';
+            maxValueElement.textContent = '-';
+            rawDataElement.textContent = 'No data received yet.';
+            
+            // Clear all charts and data points
+            for (const key in charts) {
+                clearChartData(key);
+            }
+        });
+        
+        // Generate ISO format timestamp with Z suffix for Azure compatibility
+        function getIsoTimestamp() {
+            return new Date().toISOString();
+        }
+    </script>
+</body>
+</html>
